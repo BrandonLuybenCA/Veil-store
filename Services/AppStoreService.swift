@@ -1,5 +1,4 @@
 import FirebaseFirestore
-import FirebaseFirestoreSwift
 
 class AppStoreService: ObservableObject {
     @Published var allApps: [AppEntry] = []
