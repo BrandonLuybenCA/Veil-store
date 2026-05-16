@@ -1,3 +1,4 @@
+// Updated import statement. This is the fix.
 import FirebaseFirestore
 
 class AppStoreService: ObservableObject {
