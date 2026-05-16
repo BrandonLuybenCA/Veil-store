@@ -40,8 +40,4 @@ targets:
       - package: Firebase
         product: FirebaseFirestore
       - package: Firebase
-        product: FirebaseFirestoreSwift
-      - package: Firebase
         product: FirebaseStorage
-      - package: Firebase
-        product: FirebaseAuthCombine-Community   # not strictly needed but safe
