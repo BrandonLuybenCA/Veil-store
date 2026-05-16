@@ -1,4 +1,7 @@
-// Updated import statement. This is the fix.
+// Replace the old import:
+// import FirebaseFirestoreSwift
+
+// With the new import:
 import FirebaseFirestore
 
 class AppStoreService: ObservableObject {
