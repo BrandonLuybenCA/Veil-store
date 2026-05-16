@@ -1,32 +1,25 @@
-// Replace the old import:
-// import FirebaseFirestoreSwift
-
-// With the new import:
-import FirebaseFirestore
+import SwiftUI
 
 class AppStoreService: ObservableObject {
     @Published var allApps: [AppEntry] = []
     @Published var featuredApps: [AppEntry] = []
     @Published var categories: [String: [AppEntry]] = [:]
-    private let db = Firestore.firestore()
+
+    // Replace this URL with the raw URL of your apps.json file on GitHub
+    private let jsonURL = "https://raw.githubusercontent.com/YOUR_USERNAME/Veil/main/apps.json"
 
     func fetchApps() async {
+        guard let url = URL(string: jsonURL) else { return }
         do {
-            let snapshot = try await db.collection("apps")
-                .whereField("isActive", isEqualTo: true)
-                .getDocuments()
-            let apps = snapshot.documents.compactMap { try? $0.data(as: AppEntry.self) }
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let apps = try JSONDecoder().decode([AppEntry].self, from: data)
             await MainActor.run {
                 self.allApps = apps
                 self.featuredApps = apps.filter { $0.featured }
                 self.categories = Dictionary(grouping: apps, by: { $0.category })
             }
         } catch {
-            print("Error fetching apps: \(error)")
+            print("Failed to load apps: \(error)")
         }
-    }
-
-    func addApp(_ app: AppEntry) async throws {
-        let _ = try await db.collection("apps").addDocument(from: app)
     }
 }
