@@ -1,4 +1,4 @@
-import FirebaseFirestoreSwift
+import FirebaseFirestore
 
 struct AppEntry: Identifiable, Codable {
     @DocumentID var id: String?
