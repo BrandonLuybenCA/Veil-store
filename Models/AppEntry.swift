@@ -1,7 +1,7 @@
-import FirebaseFirestore
+import Foundation
 
 struct AppEntry: Identifiable, Codable {
-    @DocumentID var id: String?
+    var id = UUID()
     var title: String
     var subtitle: String
     var description: String
