@@ -12,11 +12,6 @@ settings:
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGNING_ALLOWED: NO
 
-packages:
-  Firebase:
-    url: https://github.com/firebase/firebase-ios-sdk.git
-    from: 11.0.0
-
 targets:
   Veil:
     type: application
@@ -30,14 +25,9 @@ targets:
           - "project.yml"
           - "README.md"
           - "*.yml"
+          - "apps.json"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.veil.store
         INFOPLIST_FILE: Info.plist
-    dependencies:
-      - package: Firebase
-        product: FirebaseAuth
-      - package: Firebase
-        product: FirebaseFirestore
-      - package: Firebase
-        product: FirebaseStorage
+    dependencies: []
