@@ -47,12 +47,25 @@ jobs:
           zip -r ../../../../unsigned.ipa Payload
           cd ../../../../
 
+      - name: Test Sideloadly
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          echo "Testing Sideloadly connection..."
+          sideloadly-cli sign \
+            --apple-id "$APPLE_ID" \
+            --apple-password "$APPLE_PASSWORD" \
+            --ipa unsigned.ipa \
+            --output Veil_test.ipa 2>&1 || true
+          echo "Exit code: $?"
+
       - name: Create serve directory and files
         run: |
-          mkdir -p serve
+          mkdir -p serve/cgi-bin
 
           # Create the sign script
-          cat > sign.sh << 'SCRIPT'
+          cat > serve/cgi-bin/sign.sh << 'SCRIPT'
           #!/bin/bash
           CODE="$1"
           echo "Content-Type: application/json"
@@ -72,7 +85,7 @@ jobs:
             echo "{\"success\":false,\"error\":\"$ERROR_MSG\"}"
           fi
           SCRIPT
-          chmod +x sign.sh
+          chmod +x serve/cgi-bin/sign.sh
 
           # Create HTML page
           cat > serve/index.html << 'HTML'
