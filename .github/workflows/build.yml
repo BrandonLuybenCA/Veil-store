@@ -1,4 +1,4 @@
-name: Build & Quick OTA
+name: Build, Sign & OTA
 on:
   push:
     branches: [ main ]
@@ -7,8 +7,6 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    permissions:
-      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,7 +26,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Build IPA
+      - name: Build unsigned IPA
         run: |
           xcodebuild archive \
             -project Veil.xcodeproj \
@@ -41,16 +39,132 @@ jobs:
           cd build/Veil.xcarchive/Products/Applications/
           mkdir Payload
           cp -R Veil.app Payload/
-          zip -r Veil.ipa Payload
-          cp Veil.ipa ../../../../
+          zip -r ../../../../unsigned.ipa Payload
+          cd ../../../../
 
-      - name: Serve OTA
+      - name: Install Sideloadly CLI
         run: |
-          # Create serve directory
-          mkdir -p serve
-          cp Veil.ipa serve/
+          curl -fsSL https://raw.githubusercontent.com/Sideloadly/Sideloadly-CLI/main/install.sh | bash
 
-          # Create manifest
+      - name: Create 2FA portal
+        run: |
+          mkdir -p serve
+
+          cat > serve/index.html << 'HTML'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Veil — Enter 2FA Code</title>
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <style>
+                  body { font-family: -apple-system; background: #000; color: #fff; text-align: center; padding: 40px 20px; }
+                  input { padding: 12px; font-size: 24px; text-align: center; width: 200px; border-radius: 12px; border: none; }
+                  button { padding: 12px 30px; font-size: 18px; background: #007AFF; color: #fff; border: none; border-radius: 12px; margin-top: 15px; }
+                  .status { margin-top: 20px; font-size: 14px; color: #aaa; }
+              </style>
+          </head>
+          <body>
+              <h1>🔐 Veil Signing</h1>
+              <p>Enter the 6-digit code from your Apple device</p>
+              <input type="text" id="code" maxlength="6" placeholder="000000" inputmode="numeric">
+              <br>
+              <button onclick="submitCode()">Sign & Install</button>
+              <div class="status" id="status"></div>
+              <script>
+                  async function submitCode() {
+                      const code = document.getElementById('code').value;
+                      if (code.length !== 6) return alert('Enter 6-digit code');
+                      document.getElementById('status').textContent = 'Signing... this takes ~30 seconds';
+                      try {
+                          const res = await fetch('/sign?code=' + code);
+                          const data = await res.json();
+                          if (data.success) {
+                              document.getElementById('status').innerHTML = 
+                                  '✅ Signed! <a href="itms-services://?action=download-manifest&url=' + 
+                                  data.manifestUrl + '">Tap to Install</a>';
+                              window.location = 'itms-services://?action=download-manifest&url=' + data.manifestUrl;
+                          } else {
+                              document.getElementById('status').textContent = '❌ ' + data.error;
+                          }
+                      } catch(e) {
+                          document.getElementById('status').textContent = '❌ Error: ' + e.message;
+                      }
+                  }
+              </script>
+          </body>
+          </html>
+          HTML
+
+          cat > serve/server.py << 'PYTHON'
+          import http.server
+          import subprocess
+          import json
+          import os
+          import urllib.parse
+          import threading
+
+          signing_done = False
+          manifest_url = ""
+
+          class Handler(http.server.SimpleHTTPRequestHandler):
+              def do_GET(self):
+                  global signing_done, manifest_url
+                  if self.path.startswith('/sign'):
+                      query = urllib.parse.urlparse(self.path).query
+                      params = urllib.parse.parse_qs(query)
+                      code = params.get('code', [''])[0]
+                      
+                      self.send_response(200)
+                      self.send_header('Content-type', 'application/json')
+                      self.end_headers()
+                      
+                      try:
+                          result = subprocess.run([
+                              'sideloadly-cli', 'sign',
+                              '--apple-id', os.environ['APPLE_ID'],
+                              '--apple-password', os.environ['APPLE_PASSWORD'],
+                              '--two-factor-code', code,
+                              '--ipa', '../unsigned.ipa',
+                              '--output', '../Veil.ipa'
+                          ], capture_output=True, text=True, timeout=120)
+                          
+                          if result.returncode == 0:
+                              signing_done = True
+                              manifest_url = f"{os.environ['TUNNEL_URL']}/manifest.plist"
+                              self.wfile.write(json.dumps({
+                                  "success": True,
+                                  "manifestUrl": manifest_url
+                              }).encode())
+                          else:
+                              self.wfile.write(json.dumps({
+                                  "success": False,
+                                  "error": result.stderr[-200:] or result.stdout[-200:] or "Unknown error"
+                              }).encode())
+                      except Exception as e:
+                          self.wfile.write(json.dumps({
+                              "success": False,
+                              "error": str(e)
+                          }).encode())
+                  else:
+                      super().do_GET()
+
+          http.server.HTTPServer(('', 8080), Handler).serve_forever()
+          PYTHON
+
+      - name: Start Tunnel & Server
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          # Start tunnel
+          cloudflared tunnel --url http://localhost:8080 &
+          sleep 5
+
+          # Get tunnel URL
+          TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o 'https://[^"]*\.trycloudflare\.com')
+          export TUNNEL_URL
+
+          # Create manifest (placeholder URL, updated after signing)
           cat > serve/manifest.plist << EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -65,7 +179,7 @@ jobs:
                               <key>kind</key>
                               <string>software-package</string>
                               <key>url</key>
-                              <string>TUNNEL_URL/Veil.ipa</string>
+                              <string>${TUNNEL_URL}/Veil.ipa</string>
                           </dict>
                       </array>
                       <key>metadata</key>
@@ -85,29 +199,19 @@ jobs:
           </plist>
           EOF
 
-          # Start tunnel in background
-          cloudflared tunnel --url http://localhost:8080 &
-          sleep 5
+          echo ""
+          echo "========================================="
+          echo "  OPEN ON YOUR IPHONE:"
+          echo "  ${TUNNEL_URL}"
+          echo ""
+          echo "  Enter 2FA code → signs → installs OTA"
+          echo "========================================="
+          echo ""
 
-          # Get tunnel URL
-          TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o '"https://[^"]*trycloudflare.com"')
-          echo "Tunnel URL: $TUNNEL_URL"
-
-          # Update manifest with actual URL
-          sed -i "" "s|TUNNEL_URL|$TUNNEL_URL|g" serve/manifest.plist
-
-          # Start simple HTTP server
-          cd serve && python3 -m http.server 8080 &
+          # Start Python server with signing endpoint
+          cd serve && python3 server.py &
           sleep 2
 
-          # Print OTA link
-          echo ""
-          echo "==================================="
-          echo "  OTA INSTALL LINK (6hr window):"
-          echo "  itms-services://?action=download-manifest&url=${TUNNEL_URL}/manifest.plist"
-          echo "==================================="
-          echo ""
-
-          # Keep alive for 1 hour to allow download
+          # Keep alive for 1 hour
           sleep 3600
         timeout-minutes: 70
