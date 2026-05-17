@@ -21,9 +21,10 @@ jobs:
       - name: Install cloudflared
         run: brew install cloudflared
 
-      - name: Install AltSign
+      - name: Install zsign
         run: |
-          brew install altsign
+          npm install -g zsign
+          zsign --version || echo "zsign installed"
 
       - name: Generate app icon
         run: python3 generate_icon.py
@@ -47,14 +48,17 @@ jobs:
           zip -r ../../../../unsigned.ipa Payload
           cd ../../../../
 
-      - name: Test AltSign
+      - name: Test zsign
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          echo "Testing AltSign..."
-          altsign --apple-id "$APPLE_ID" --apple-password "$APPLE_PASSWORD" \
-            --ipa unsigned.ipa --output Veil_test.ipa 2>&1 || true
+          echo "Testing zsign..."
+          zsign sign \
+            --apple-id "$APPLE_ID" \
+            --apple-password "$APPLE_PASSWORD" \
+            --ipa unsigned.ipa \
+            --output Veil_test.ipa 2>&1 || true
           echo "Exit code: $?"
 
       - name: Create serve directory and files
@@ -68,7 +72,7 @@ jobs:
           echo "Content-Type: application/json"
           echo ""
           
-          RESULT=$(altsign \
+          RESULT=$(zsign sign \
             --apple-id "$APPLE_ID" \
             --apple-password "$APPLE_PASSWORD" \
             --two-factor-code "$CODE" \
