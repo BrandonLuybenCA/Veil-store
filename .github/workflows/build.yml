@@ -7,14 +7,17 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install xcodegen
-          pip3 install --break-system-packages Pillow
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Install Pillow
+        run: pip3 install --break-system-packages Pillow
 
       - name: Generate app icon
         run: python3 generate_icon.py
@@ -32,12 +35,17 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-          mkdir -p Payload
-          cp -R build/Veil.xcarchive/Products/Applications/Veil.app Payload/
-          zip -r Veil.ipa Payload
+          xcodebuild -exportArchive \
+            -archivePath build/Veil.xcarchive \
+            -exportPath build/ \
+            -exportOptionsPlist exportOptions.plist
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: Veil.ipa
-          path: Veil.ipa
+          tag_name: v${{ github.run_number }}
+          name: Veil Build ${{ github.run_number }}
+          files: build/Veil.ipa
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
