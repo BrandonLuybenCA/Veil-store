@@ -21,9 +21,9 @@ jobs:
       - name: Install cloudflared
         run: brew install cloudflared
 
-      - name: Install Sideloadly CLI
+      - name: Install AltSign
         run: |
-          curl -fsSL https://raw.githubusercontent.com/Sideloadly/Sideloadly-CLI/main/install.sh | bash
+          brew install altsign
 
       - name: Generate app icon
         run: python3 generate_icon.py
@@ -47,17 +47,14 @@ jobs:
           zip -r ../../../../unsigned.ipa Payload
           cd ../../../../
 
-      - name: Test Sideloadly
+      - name: Test AltSign
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          echo "Testing Sideloadly connection..."
-          sideloadly-cli sign \
-            --apple-id "$APPLE_ID" \
-            --apple-password "$APPLE_PASSWORD" \
-            --ipa unsigned.ipa \
-            --output Veil_test.ipa 2>&1 || true
+          echo "Testing AltSign..."
+          altsign --apple-id "$APPLE_ID" --apple-password "$APPLE_PASSWORD" \
+            --ipa unsigned.ipa --output Veil_test.ipa 2>&1 || true
           echo "Exit code: $?"
 
       - name: Create serve directory and files
@@ -71,7 +68,7 @@ jobs:
           echo "Content-Type: application/json"
           echo ""
           
-          RESULT=$(sideloadly-cli sign \
+          RESULT=$(altsign \
             --apple-id "$APPLE_ID" \
             --apple-password "$APPLE_PASSWORD" \
             --two-factor-code "$CODE" \
@@ -142,7 +139,6 @@ jobs:
           SERVER_PID=$!
           cd ..
 
-          # Wait for server to be ready
           sleep 3
 
           # Start tunnel
