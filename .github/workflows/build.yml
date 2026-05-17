@@ -21,157 +21,69 @@ jobs:
       - name: Install cloudflared
         run: brew install cloudflared
 
-      - name: Install zsign
-        run: |
-          npm install -g zsign
-          zsign --version || echo "zsign installed"
-
       - name: Generate app icon
         run: python3 generate_icon.py
 
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Build unsigned IPA
+      - name: Create Export Options
         run: |
-          xcodebuild archive \
+          cat > exportOptions.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>method</key>
+              <string>development</string>
+              <key>signingStyle</key>
+              <string>automatic</string>
+              <key>teamID</key>
+              <string>AUTO</string>
+          </dict>
+          </plist>
+          EOF
+
+      - name: Open Keychain
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+
+      - name: Sign in to Apple ID
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+        run: |
+          xcodebuild -resolvePackageDependencies
+          xcodebuild -allowProvisioningUpdates \
             -project Veil.xcodeproj \
             -scheme Veil \
+            -destination 'platform=iOS,name=Any iOS Device' \
+            DEVELOPMENT_TEAM=AUTO \
+            CODE_SIGN_STYLE=Automatic \
+            -authenticationKeyID="" \
+            -authenticationIssuerID="" \
+            APPLE_ID="$APPLE_ID" \
+            APPLE_APP_SPECIFIC_PASSWORD="$APPLE_PASSWORD" \
+            archive \
+            -archivePath build/Veil.xcarchive
+
+      - name: Export Signed IPA
+        run: |
+          xcodebuild -exportArchive \
             -archivePath build/Veil.xcarchive \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            -exportPath build/ \
+            -exportOptionsPlist exportOptions.plist \
+            -allowProvisioningUpdates
 
-          cd build/Veil.xcarchive/Products/Applications/
-          mkdir Payload
-          cp -R Veil.app Payload/
-          zip -r ../../../../unsigned.ipa Payload
-          cd ../../../../
-
-      - name: Test zsign
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      - name: Create serve directory and OTA manifest
         run: |
-          echo "Testing zsign..."
-          zsign sign \
-            --apple-id "$APPLE_ID" \
-            --apple-password "$APPLE_PASSWORD" \
-            --ipa unsigned.ipa \
-            --output Veil_test.ipa 2>&1 || true
-          echo "Exit code: $?"
+          mkdir -p serve
+          cp build/Veil.ipa serve/
 
-      - name: Create serve directory and files
-        run: |
-          mkdir -p serve/cgi-bin
-
-          # Create the sign script
-          cat > serve/cgi-bin/sign.sh << 'SCRIPT'
-          #!/bin/bash
-          CODE="$1"
-          echo "Content-Type: application/json"
-          echo ""
-          
-          RESULT=$(zsign sign \
-            --apple-id "$APPLE_ID" \
-            --apple-password "$APPLE_PASSWORD" \
-            --two-factor-code "$CODE" \
-            --ipa unsigned.ipa \
-            --output Veil.ipa 2>&1)
-          
-          if [ $? -eq 0 ]; then
-            echo "{\"success\":true,\"manifestUrl\":\"${TUNNEL_URL}/manifest.plist\"}"
-          else
-            ERROR_MSG=$(echo "$RESULT" | tail -5 | tr '\n' ' ' | sed 's/"/\\"/g')
-            echo "{\"success\":false,\"error\":\"$ERROR_MSG\"}"
-          fi
-          SCRIPT
-          chmod +x serve/cgi-bin/sign.sh
-
-          # Create HTML page
-          cat > serve/index.html << 'HTML'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <title>Veil — Enter 2FA Code</title>
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <style>
-                  body { font-family: -apple-system; background: #000; color: #fff; text-align: center; padding: 40px 20px; }
-                  input { padding: 12px; font-size: 24px; text-align: center; width: 200px; border-radius: 12px; border: none; }
-                  button { padding: 12px 30px; font-size: 18px; background: #007AFF; color: #fff; border: none; border-radius: 12px; margin-top: 15px; }
-                  .status { margin-top: 20px; font-size: 14px; color: #aaa; }
-              </style>
-          </head>
-          <body>
-              <h1>Veil Signing</h1>
-              <p>Enter the 6-digit code from your Apple device</p>
-              <input type="text" id="code" maxlength="6" placeholder="000000" inputmode="numeric">
-              <br>
-              <button onclick="submitCode()">Sign & Install</button>
-              <div class="status" id="status"></div>
-              <script>
-                  async function submitCode() {
-                      const code = document.getElementById('code').value;
-                      if (code.length !== 6) return alert('Enter 6-digit code');
-                      document.getElementById('status').textContent = 'Signing...';
-                      try {
-                          const res = await fetch('/cgi-bin/sign.sh?code=' + code);
-                          const data = await res.json();
-                          if (data.success) {
-                              document.getElementById('status').innerHTML = 'Signed! <a href="itms-services://?action=download-manifest&url=' + data.manifestUrl + '">Tap to Install</a>';
-                              window.location = 'itms-services://?action=download-manifest&url=' + data.manifestUrl;
-                          } else {
-                              document.getElementById('status').textContent = data.error;
-                          }
-                      } catch(e) {
-                          document.getElementById('status').textContent = 'Error: ' + e.message;
-                      }
-                  }
-              </script>
-          </body>
-          </html>
-          HTML
-
-      - name: Start Tunnel & Server
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        run: |
-          # Start simple Python CGI server
-          cd serve
-          python3 -m http.server --cgi 8080 &
-          SERVER_PID=$!
-          cd ..
-
-          sleep 3
-
-          # Start tunnel
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-          TUNNEL_PID=$!
-
-          # Wait for tunnel URL
-          TUNNEL_URL=""
-          for i in $(seq 1 30); do
-            TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1)
-            if [ -n "$TUNNEL_URL" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "FAILED TO GET TUNNEL URL"
-            echo "=== Tunnel logs ==="
-            cat tunnel.log
-            echo "=== Server check ==="
-            curl -s http://localhost:8080/ | head -5 || echo "Server not responding"
-            exit 1
-          fi
-
-          export TUNNEL_URL
-
-          # Create manifest
-          cat > serve/manifest.plist << EOF
+          cat > serve/manifest.plist << 'PLACEHOLDER'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -185,7 +97,7 @@ jobs:
                               <key>kind</key>
                               <string>software-package</string>
                               <key>url</key>
-                              <string>${TUNNEL_URL}/Veil.ipa</string>
+                              <string>TUNNEL_URL/Veil.ipa</string>
                           </dict>
                       </array>
                       <key>metadata</key>
@@ -203,16 +115,44 @@ jobs:
               </array>
           </dict>
           </plist>
-          EOF
+          PLACEHOLDER
+
+      - name: Start Tunnel
+        run: |
+          cd serve
+          python3 -m http.server 8080 &
+          cd ..
+
+          sleep 2
+
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "FAILED TO GET TUNNEL URL"
+            cat tunnel.log
+            exit 1
+          fi
+
+          # Update manifest with real URL
+          sed -i '' "s|TUNNEL_URL|$TUNNEL_URL|g" serve/manifest.plist
 
           echo ""
           echo "========================================="
-          echo "  OPEN ON YOUR IPHONE:"
-          echo "  ${TUNNEL_URL}"
+          echo "  INSTALL ON YOUR IPHONE:"
           echo ""
-          echo "  Tunnel will stay alive for 60 minutes"
+          echo "  itms-services://?action=download-manifest&url=${TUNNEL_URL}/manifest.plist"
+          echo ""
+          echo "  ⚠️ Tunnel alive for 60 minutes"
           echo "========================================="
           echo ""
 
-          # Keep alive
           sleep 3600
