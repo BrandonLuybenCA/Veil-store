@@ -47,10 +47,34 @@ jobs:
           zip -r ../../../../unsigned.ipa Payload
           cd ../../../../
 
-      - name: Create 2FA portal
+      - name: Create serve directory and files
         run: |
           mkdir -p serve
 
+          # Create the sign script
+          cat > sign.sh << 'SCRIPT'
+          #!/bin/bash
+          CODE="$1"
+          echo "Content-Type: application/json"
+          echo ""
+          
+          RESULT=$(sideloadly-cli sign \
+            --apple-id "$APPLE_ID" \
+            --apple-password "$APPLE_PASSWORD" \
+            --two-factor-code "$CODE" \
+            --ipa unsigned.ipa \
+            --output Veil.ipa 2>&1)
+          
+          if [ $? -eq 0 ]; then
+            echo "{\"success\":true,\"manifestUrl\":\"${TUNNEL_URL}/manifest.plist\"}"
+          else
+            ERROR_MSG=$(echo "$RESULT" | tail -5 | tr '\n' ' ' | sed 's/"/\\"/g')
+            echo "{\"success\":false,\"error\":\"$ERROR_MSG\"}"
+          fi
+          SCRIPT
+          chmod +x sign.sh
+
+          # Create HTML page
           cat > serve/index.html << 'HTML'
           <!DOCTYPE html>
           <html>
@@ -77,7 +101,7 @@ jobs:
                       if (code.length !== 6) return alert('Enter 6-digit code');
                       document.getElementById('status').textContent = 'Signing...';
                       try {
-                          const res = await fetch('/sign?code=' + code);
+                          const res = await fetch('/cgi-bin/sign.sh?code=' + code);
                           const data = await res.json();
                           if (data.success) {
                               document.getElementById('status').innerHTML = 'Signed! <a href="itms-services://?action=download-manifest&url=' + data.manifestUrl + '">Tap to Install</a>';
@@ -94,62 +118,21 @@ jobs:
           </html>
           HTML
 
-          cat > serve/server.py << 'PYTHON'
-          import http.server
-          import subprocess
-          import json
-          import os
-          import urllib.parse
-
-          class Handler(http.server.SimpleHTTPRequestHandler):
-              def do_GET(self):
-                  if self.path.startswith('/sign'):
-                      query = urllib.parse.urlparse(self.path).query
-                      params = urllib.parse.parse_qs(query)
-                      code = params.get('code', [''])[0]
-                      
-                      self.send_response(200)
-                      self.send_header('Content-type', 'application/json')
-                      self.end_headers()
-                      
-                      try:
-                          result = subprocess.run([
-                              'sideloadly-cli', 'sign',
-                              '--apple-id', os.environ['APPLE_ID'],
-                              '--apple-password', os.environ['APPLE_PASSWORD'],
-                              '--two-factor-code', code,
-                              '--ipa', '../unsigned.ipa',
-                              '--output', '../Veil.ipa'
-                          ], capture_output=True, text=True, timeout=120)
-                          
-                          if result.returncode == 0:
-                              manifest_url = f"{os.environ['TUNNEL_URL']}/manifest.plist"
-                              self.wfile.write(json.dumps({
-                                  "success": True,
-                                  "manifestUrl": manifest_url
-                              }).encode())
-                          else:
-                              self.wfile.write(json.dumps({
-                                  "success": False,
-                                  "error": result.stderr[-300:] or result.stdout[-300:] or "Signing failed"
-                              }).encode())
-                      except Exception as e:
-                          self.wfile.write(json.dumps({
-                              "success": False,
-                              "error": str(e)
-                          }).encode())
-                  else:
-                      super().do_GET()
-
-          http.server.HTTPServer(('', 8080), Handler).serve_forever()
-          PYTHON
-
       - name: Start Tunnel & Server
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          # Start tunnel, capture log
+          # Start simple Python CGI server
+          cd serve
+          python3 -m http.server --cgi 8080 &
+          SERVER_PID=$!
+          cd ..
+
+          # Wait for server to be ready
+          sleep 3
+
+          # Start tunnel
           cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
           TUNNEL_PID=$!
 
@@ -165,19 +148,16 @@ jobs:
 
           if [ -z "$TUNNEL_URL" ]; then
             echo "FAILED TO GET TUNNEL URL"
+            echo "=== Tunnel logs ==="
             cat tunnel.log
+            echo "=== Server check ==="
+            curl -s http://localhost:8080/ | head -5 || echo "Server not responding"
             exit 1
           fi
 
           export TUNNEL_URL
-          echo ""
-          echo "========================================="
-          echo "  OPEN ON YOUR IPHONE:"
-          echo "  ${TUNNEL_URL}"
-          echo "========================================="
-          echo ""
 
-          # Create manifest with tunnel URL
+          # Create manifest
           cat > serve/manifest.plist << EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -212,14 +192,14 @@ jobs:
           </plist>
           EOF
 
-          # Start Python server
-          cd serve
-          python3 server.py &
-          SERVER_PID=$!
-          cd ..
-
-          echo "Server running. Tunnel will stay alive for 60 minutes."
-          echo "Press Ctrl+C to stop (if running locally)"
+          echo ""
+          echo "========================================="
+          echo "  OPEN ON YOUR IPHONE:"
+          echo "  ${TUNNEL_URL}"
+          echo ""
+          echo "  Tunnel will stay alive for 60 minutes"
+          echo "========================================="
+          echo ""
 
           # Keep alive
           sleep 3600
