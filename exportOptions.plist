@@ -9,8 +9,11 @@
     <key>signingStyle</key>
     <string>manual</string>
     <key>signingCertificate</key>
-    <string></string>
+    <string>iPhone Developer</string>
     <key>provisioningProfiles</key>
-    <dict/>
+    <dict>
+        <key>com.veil.store</key>
+        <string>Veil</string>
+    </dict>
 </dict>
 </plist>
