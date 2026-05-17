@@ -3,17 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>method</key>
-    <string>development</string>
-    <key>compileBitcode</key>
-    <false/>
+    <string>developer-id</string>
     <key>signingStyle</key>
     <string>manual</string>
     <key>signingCertificate</key>
-    <string>iPhone Developer</string>
+    <string></string>
     <key>provisioningProfiles</key>
-    <dict>
-        <key>com.veil.store</key>
-        <string>Veil</string>
-    </dict>
+    <dict/>
 </dict>
 </plist>
