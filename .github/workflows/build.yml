@@ -1,4 +1,4 @@
-name: Build Veil IPA
+name: Build & Quick OTA
 on:
   push:
     branches: [ main ]
@@ -19,6 +19,9 @@ jobs:
       - name: Install Pillow
         run: pip3 install --break-system-packages Pillow
 
+      - name: Install cloudflared
+        run: brew install cloudflared
+
       - name: Generate app icon
         run: python3 generate_icon.py
 
@@ -35,18 +38,76 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
 
-          # Create the IPA manually with proper structure
           cd build/Veil.xcarchive/Products/Applications/
           mkdir Payload
           cp -R Veil.app Payload/
-          zip -r ../../../../Veil.ipa Payload
-          cd ../../../../
+          zip -r Veil.ipa Payload
+          cp Veil.ipa ../../../../
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          name: Veil Build ${{ github.run_number }}
-          files: Veil.ipa
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Serve OTA
+        run: |
+          # Create serve directory
+          mkdir -p serve
+          cp Veil.ipa serve/
+
+          # Create manifest
+          cat > serve/manifest.plist << EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>items</key>
+              <array>
+                  <dict>
+                      <key>assets</key>
+                      <array>
+                          <dict>
+                              <key>kind</key>
+                              <string>software-package</string>
+                              <key>url</key>
+                              <string>TUNNEL_URL/Veil.ipa</string>
+                          </dict>
+                      </array>
+                      <key>metadata</key>
+                      <dict>
+                          <key>bundle-identifier</key>
+                          <string>com.veil.store</string>
+                          <key>bundle-version</key>
+                          <string>1.0</string>
+                          <key>kind</key>
+                          <string>software</string>
+                          <key>title</key>
+                          <string>Veil</string>
+                      </dict>
+                  </dict>
+              </array>
+          </dict>
+          </plist>
+          EOF
+
+          # Start tunnel in background
+          cloudflared tunnel --url http://localhost:8080 &
+          sleep 5
+
+          # Get tunnel URL
+          TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o '"https://[^"]*trycloudflare.com"')
+          echo "Tunnel URL: $TUNNEL_URL"
+
+          # Update manifest with actual URL
+          sed -i "" "s|TUNNEL_URL|$TUNNEL_URL|g" serve/manifest.plist
+
+          # Start simple HTTP server
+          cd serve && python3 -m http.server 8080 &
+          sleep 2
+
+          # Print OTA link
+          echo ""
+          echo "==================================="
+          echo "  OTA INSTALL LINK (6hr window):"
+          echo "  itms-services://?action=download-manifest&url=${TUNNEL_URL}/manifest.plist"
+          echo "==================================="
+          echo ""
+
+          # Keep alive for 1 hour to allow download
+          sleep 3600
+        timeout-minutes: 70
