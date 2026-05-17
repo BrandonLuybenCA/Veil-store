@@ -7,6 +7,7 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,6 +20,10 @@ jobs:
 
       - name: Install cloudflared
         run: brew install cloudflared
+
+      - name: Install Sideloadly CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/Sideloadly/Sideloadly-CLI/main/install.sh | bash
 
       - name: Generate app icon
         run: python3 generate_icon.py
@@ -42,10 +47,6 @@ jobs:
           zip -r ../../../../unsigned.ipa Payload
           cd ../../../../
 
-      - name: Install Sideloadly CLI
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/Sideloadly/Sideloadly-CLI/main/install.sh | bash
-
       - name: Create 2FA portal
         run: |
           mkdir -p serve
@@ -64,7 +65,7 @@ jobs:
               </style>
           </head>
           <body>
-              <h1>🔐 Veil Signing</h1>
+              <h1>Veil Signing</h1>
               <p>Enter the 6-digit code from your Apple device</p>
               <input type="text" id="code" maxlength="6" placeholder="000000" inputmode="numeric">
               <br>
@@ -74,20 +75,18 @@ jobs:
                   async function submitCode() {
                       const code = document.getElementById('code').value;
                       if (code.length !== 6) return alert('Enter 6-digit code');
-                      document.getElementById('status').textContent = 'Signing... this takes ~30 seconds';
+                      document.getElementById('status').textContent = 'Signing...';
                       try {
                           const res = await fetch('/sign?code=' + code);
                           const data = await res.json();
                           if (data.success) {
-                              document.getElementById('status').innerHTML = 
-                                  '✅ Signed! <a href="itms-services://?action=download-manifest&url=' + 
-                                  data.manifestUrl + '">Tap to Install</a>';
+                              document.getElementById('status').innerHTML = 'Signed! <a href="itms-services://?action=download-manifest&url=' + data.manifestUrl + '">Tap to Install</a>';
                               window.location = 'itms-services://?action=download-manifest&url=' + data.manifestUrl;
                           } else {
-                              document.getElementById('status').textContent = '❌ ' + data.error;
+                              document.getElementById('status').textContent = data.error;
                           }
                       } catch(e) {
-                          document.getElementById('status').textContent = '❌ Error: ' + e.message;
+                          document.getElementById('status').textContent = 'Error: ' + e.message;
                       }
                   }
               </script>
@@ -101,14 +100,9 @@ jobs:
           import json
           import os
           import urllib.parse
-          import threading
-
-          signing_done = False
-          manifest_url = ""
 
           class Handler(http.server.SimpleHTTPRequestHandler):
               def do_GET(self):
-                  global signing_done, manifest_url
                   if self.path.startswith('/sign'):
                       query = urllib.parse.urlparse(self.path).query
                       params = urllib.parse.parse_qs(query)
@@ -129,7 +123,6 @@ jobs:
                           ], capture_output=True, text=True, timeout=120)
                           
                           if result.returncode == 0:
-                              signing_done = True
                               manifest_url = f"{os.environ['TUNNEL_URL']}/manifest.plist"
                               self.wfile.write(json.dumps({
                                   "success": True,
@@ -138,7 +131,7 @@ jobs:
                           else:
                               self.wfile.write(json.dumps({
                                   "success": False,
-                                  "error": result.stderr[-200:] or result.stdout[-200:] or "Unknown error"
+                                  "error": result.stderr[-300:] or result.stdout[-300:] or "Signing failed"
                               }).encode())
                       except Exception as e:
                           self.wfile.write(json.dumps({
@@ -156,15 +149,35 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          # Start tunnel
-          cloudflared tunnel --url http://localhost:8080 &
-          sleep 5
+          # Start tunnel, capture log
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
 
-          # Get tunnel URL
-          TUNNEL_URL=$(curl -s http://localhost:4040/api/tunnels | grep -o 'https://[^"]*\.trycloudflare\.com')
+          # Wait for tunnel URL
+          TUNNEL_URL=""
+          for i in $(seq 1 30); do
+            TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TUNNEL_URL" ]; then
+            echo "FAILED TO GET TUNNEL URL"
+            cat tunnel.log
+            exit 1
+          fi
+
           export TUNNEL_URL
+          echo ""
+          echo "========================================="
+          echo "  OPEN ON YOUR IPHONE:"
+          echo "  ${TUNNEL_URL}"
+          echo "========================================="
+          echo ""
 
-          # Create manifest (placeholder URL, updated after signing)
+          # Create manifest with tunnel URL
           cat > serve/manifest.plist << EOF
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -199,19 +212,14 @@ jobs:
           </plist>
           EOF
 
-          echo ""
-          echo "========================================="
-          echo "  OPEN ON YOUR IPHONE:"
-          echo "  ${TUNNEL_URL}"
-          echo ""
-          echo "  Enter 2FA code → signs → installs OTA"
-          echo "========================================="
-          echo ""
+          # Start Python server
+          cd serve
+          python3 server.py &
+          SERVER_PID=$!
+          cd ..
 
-          # Start Python server with signing endpoint
-          cd serve && python3 server.py &
-          sleep 2
+          echo "Server running. Tunnel will stay alive for 60 minutes."
+          echo "Press Ctrl+C to stop (if running locally)"
 
-          # Keep alive for 1 hour
+          # Keep alive
           sleep 3600
-        timeout-minutes: 70
