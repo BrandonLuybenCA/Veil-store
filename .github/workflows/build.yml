@@ -1,4 +1,4 @@
-name: Build, Sign & OTA
+name: Build Veil IPA
 on:
   push:
     branches: [ main ]
@@ -7,7 +7,8 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 70
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,141 +19,37 @@ jobs:
       - name: Install Pillow
         run: pip3 install --break-system-packages Pillow
 
-      - name: Install cloudflared
-        run: brew install cloudflared
-
       - name: Generate app icon
         run: python3 generate_icon.py
 
       - name: Generate Xcode project
         run: xcodegen generate --spec project.yml
 
-      - name: Create Export Options
+      - name: Build Simulator IPA
         run: |
-          cat > exportOptions.plist << EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>method</key>
-              <string>development</string>
-              <key>signingStyle</key>
-              <string>automatic</string>
-              <key>teamID</key>
-              <string>AUTO</string>
-          </dict>
-          </plist>
-          EOF
-
-      - name: Open Keychain
-        run: |
-          security create-keychain -p "" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "" build.keychain
-          security set-keychain-settings -t 3600 -u build.keychain
-
-      - name: Sign in to Apple ID
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        run: |
-          xcodebuild -resolvePackageDependencies
-          xcodebuild -allowProvisioningUpdates \
+          xcodebuild build \
             -project Veil.xcodeproj \
             -scheme Veil \
-            -destination 'platform=iOS,name=Any iOS Device' \
-            DEVELOPMENT_TEAM=AUTO \
-            CODE_SIGN_STYLE=Automatic \
-            -authenticationKeyID="" \
-            -authenticationIssuerID="" \
-            APPLE_ID="$APPLE_ID" \
-            APPLE_APP_SPECIFIC_PASSWORD="$APPLE_PASSWORD" \
-            archive \
-            -archivePath build/Veil.xcarchive
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,name=iPhone 16" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CONFIGURATION_BUILD_DIR=build/Simulator
 
-      - name: Export Signed IPA
-        run: |
-          xcodebuild -exportArchive \
-            -archivePath build/Veil.xcarchive \
-            -exportPath build/ \
-            -exportOptionsPlist exportOptions.plist \
-            -allowProvisioningUpdates
+          # Create IPA from simulator build
+          cd build/Simulator
+          mkdir Payload
+          cp -R Veil.app Payload/
+          zip -r ../../Veil_Simulator.zip Payload
+          cd ../..
 
-      - name: Create serve directory and OTA manifest
-        run: |
-          mkdir -p serve
-          cp build/Veil.ipa serve/
-
-          cat > serve/manifest.plist << 'PLACEHOLDER'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-              <key>items</key>
-              <array>
-                  <dict>
-                      <key>assets</key>
-                      <array>
-                          <dict>
-                              <key>kind</key>
-                              <string>software-package</string>
-                              <key>url</key>
-                              <string>TUNNEL_URL/Veil.ipa</string>
-                          </dict>
-                      </array>
-                      <key>metadata</key>
-                      <dict>
-                          <key>bundle-identifier</key>
-                          <string>com.veil.store</string>
-                          <key>bundle-version</key>
-                          <string>1.0</string>
-                          <key>kind</key>
-                          <string>software</string>
-                          <key>title</key>
-                          <string>Veil</string>
-                      </dict>
-                  </dict>
-              </array>
-          </dict>
-          </plist>
-          PLACEHOLDER
-
-      - name: Start Tunnel
-        run: |
-          cd serve
-          python3 -m http.server 8080 &
-          cd ..
-
-          sleep 2
-
-          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
-
-          TUNNEL_URL=""
-          for i in $(seq 1 30); do
-            TUNNEL_URL=$(grep -o 'https://[a-z0-9.-]*\.trycloudflare\.com' tunnel.log 2>/dev/null | head -1)
-            if [ -n "$TUNNEL_URL" ]; then
-              break
-            fi
-            sleep 2
-          done
-
-          if [ -z "$TUNNEL_URL" ]; then
-            echo "FAILED TO GET TUNNEL URL"
-            cat tunnel.log
-            exit 1
-          fi
-
-          # Update manifest with real URL
-          sed -i '' "s|TUNNEL_URL|$TUNNEL_URL|g" serve/manifest.plist
-
-          echo ""
-          echo "========================================="
-          echo "  INSTALL ON YOUR IPHONE:"
-          echo ""
-          echo "  itms-services://?action=download-manifest&url=${TUNNEL_URL}/manifest.plist"
-          echo ""
-          echo "  ⚠️ Tunnel alive for 60 minutes"
-          echo "========================================="
-          echo ""
-
-          sleep 3600
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Veil Simulator Build ${{ github.run_number }}
+          files: Veil_Simulator.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
